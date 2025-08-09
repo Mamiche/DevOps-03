@@ -1,0 +1,197 @@
+---
+- name: Provision Jenkins + dev tools + Docker + Tomcat
+  hosts: jenkins
+  become: true
+  vars:
+    jdk_package: java-17-amazon-corretto-devel
+    maven_epel_repo_url: https://repos.fedorapeople.org/repos/dchen/apache-maven/epel-apache-maven.repo
+    tomcat_image: tomcat:8.5
+    tomcat_container_name: tomcat-app
+    host_tomcat_port: 8081
+    container_tomcat_port: 8080
+    maven_version: 3.9.1
+    maven_install_dir: "/opt/apache-maven-{{ maven_version }}"
+    maven_symlink: /opt/maven
+    maven_sha512_url: "https://archive.apache.org/dist/maven/maven-3/{{ maven_version }}/binaries/apache-maven-{{ maven_version }}-bin.tar.gz.sha512"
+    maven_bin_url: "https://archive.apache.org/dist/maven/maven-3/{{ maven_version }}/binaries/apache-maven-{{ maven_version }}-bin.tar.gz"
+    build_dir: /tmp/tomcat_build
+    dockeradmin_password_empty: false
+    dockeradmin_password_plain: "pass"
+  
+  tasks:
+    - name: Mettre à jour tous les paquets
+      yum:
+        name: "*"
+        state: latest
+        update_cache: yes
+
+    - name: Installer Java 17 (Amazon Corretto)
+      yum:
+        name: "{{ jdk_package }}"
+        state: present
+
+    - name: Définir JAVA_HOME et PATH globalement
+      copy:
+        dest: /etc/profile.d/java17.sh
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          export JAVA_HOME=/usr/lib/jvm/java-17-amazon-corretto.x86_64
+          export PATH=$JAVA_HOME/bin:$PATH
+
+    - name: Installer Git
+      yum:
+        name: git
+        state: present
+
+    - name: Télécharger l’archive binaire de Maven {{ maven_version }}
+      ansible.builtin.get_url:
+        url: "{{ maven_bin_url }}"
+        dest: "/tmp/apache-maven-{{ maven_version }}-bin.tar.gz"
+        mode: "0644"
+        checksum: "sha512:{{ lookup('url', maven_sha512_url) }}"
+
+    - name: Extraire Maven dans {{ maven_install_dir }}
+      ansible.builtin.unarchive:
+        src: "/tmp/apache-maven-{{ maven_version }}-bin.tar.gz"
+        dest: /opt
+        remote_src: true
+        creates: "{{ maven_install_dir }}/bin/mvn"
+
+    - name: Maintenir lien symbolique /opt/maven vers la version en cours
+      ansible.builtin.file:
+        path: "{{ maven_symlink }}"
+        src: "{{ maven_install_dir }}"
+        state: link
+        force: true
+
+    - name: Définir les alternatives pour mvn
+      ansible.builtin.command: "update-alternatives --install /usr/bin/mvn mvn {{ maven_symlink }}/bin/mvn 100"
+      args:
+        creates: /usr/bin/mvn
+
+    - name: Ajouter le dossier bin de Maven au PATH
+      ansible.builtin.copy:
+        dest: /etc/profile.d/maven.sh
+        content: |
+          export M2_HOME="{{ maven_symlink }}"
+          export PATH="$M2_HOME/bin:$PATH"
+        mode: "0644"
+        owner: root
+
+    - name: Autoriser exécution de mvn
+      ansible.builtin.shell: "source /etc/profile.d/maven.sh"
+      args:
+        executable: /bin/bash
+
+    - name: Installer Python3-pip et Docker
+      yum:
+        name:
+          - python3
+          - python3-pip
+          - docker
+        state: present
+
+    - name: Démarrer et activer Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Ajouter l'utilisateur ec2-user au groupe docker
+      user:
+        name: ec2-user
+        groups: docker
+        append: yes
+
+    - name: Ajouter le dépôt Jenkins
+      get_url:
+        url: https://pkg.jenkins.io/redhat-stable/jenkins.repo
+        dest: /etc/yum.repos.d/jenkins.repo
+        mode: "0644"
+
+    - name: Importer la clé GPG de Jenkins
+      rpm_key:
+        state: present
+        key: https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+
+    - name: Installer Jenkins
+      yum:
+        name: jenkins
+        state: present
+
+    - name: Activer et démarrer Jenkins
+      systemd:
+        name: jenkins
+        enabled: yes
+        state: started
+
+    - name: Créer le dossier de build
+      file:
+        path: "{{ build_dir }}"
+        state: directory
+
+    - name: Générer le Dockerfile
+      copy:
+        dest: "{{ build_dir }}/Dockerfile"
+        content: |
+          FROM tomcat:latest
+          RUN cp -R /usr/local/tomcat/webapps.dist/* /usr/local/tomcat/webapps
+
+    - name: Construire l'image Tomcat personnalisée
+      community.docker.docker_image:
+        name: tomcatserver
+        tag: latest
+        build:
+          path: "{{ build_dir }}"
+        source: build
+        force_source: true
+
+    - name: Démarrer le conteneur Tomcat personnalisé
+      community.docker.docker_container:
+        name: "{{ tomcat_container_name }}"
+        image: tomcatserver:latest
+        state: started
+        restart_policy: always
+        published_ports:
+          - "{{ host_tomcat_port }}:{{ container_tomcat_port }}"
+
+    - name: Créer l’utilisateur dockeradmin
+      ansible.builtin.user:
+        name: dockeradmin
+        groups: docker
+        append: yes
+        password: "{{ dockeradmin_password_plain | password_hash('sha512') }}"
+        state: present
+
+    - name: Autoriser l’utilisateur dockeradmin au groupe docker
+      ansible.builtin.user:
+        name: dockeradmin
+        groups: docker
+        append: yes
+
+    - name: Activer l’authentification par mot de passe
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^(#\s*)?PasswordAuthentication\s+'
+        line: 'PasswordAuthentication yes'
+        state: present
+      notify: Restart sshd
+
+
+    - name: Activer PAM si nécessaire
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^(#\s*)?UsePAM\s+'
+        line: 'UsePAM yes'
+        state: present
+      notify: Restart sshd
+
+  handlers:
+    - name: Restart sshd
+      ansible.builtin.systemd:
+        name: sshd
+        state: restarted
+        daemon_reload: yes
+
