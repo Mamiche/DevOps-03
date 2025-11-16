@@ -1,173 +1,99 @@
-# Déployez votre code dans un conteneur Docker via Jenkins sur AWS
+# Déploiement d’une application Java dans un conteneur Docker via Jenkins sur AWS
 
 ![AWS](https://imgur.com/Hk28ffE.png)
 
-**Dans ce blog, nous allons déployer une application web Java dans un conteneur Docker hébergé sur une instance EC2 grâce à Jenkins.**
-
-### Plan
-
-* Installer Jenkins
-* Configurer Maven et Git
-* Intégrer GitHub et Maven avec Jenkins
-* Préparer un hôte Docker
-* Intégrer Docker avec Jenkins
-* Automatiser le processus de build et de déploiement avec Jenkins
-* Tester le déploiement
-
-### Prérequis
-
-* Compte AWS
-* Compte Git/GitHub avec le code source
-* Machine locale avec un accès CLI
-* Connaissances de base en Docker et Git
-
-## Étape 1 : Installation du serveur Jenkins sur une instance EC2 AWS
-
-- Créez une instance EC2 Linux (t2.micro)
-- Ajoutez les règles de sécurité : SSH (22) et 8080 (Jenkins)
-- Connectez-vous via SSH
-- Installez Java, EPEL, puis Jenkins
-
-```bash
-sudo wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
-sudo rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
-sudo yum install epel-release
-sudo yum install java-11-openjdk
-sudo yum install jenkins
-sudo systemctl enable jenkins
-sudo systemctl start jenkins
-```
-
-- Accédez à Jenkins via `http://<IP-PUBLIQUE>:8080`
-- Déverrouillez Jenkins avec le mot de passe situé dans `/var/lib/jenkins/secrets/initialAdminPassword`
-- Installez les plugins suggérés
-- Créez un compte admin
-
-## Étape 2 : Intégrer GitHub avec Jenkins
-
-```bash
-sudo yum install git
-git --version
-```
-
-- Depuis Jenkins :
-  - Manage Jenkins > Manage Plugins > Install "GitHub Integration"
-  - Manage Jenkins > Global Tool Configuration > Ajouter Git
-
-## Étape 3 : Intégrer Maven avec Jenkins
-
-```bash
-cd /opt
-sudo wget https://downloads.apache.org/maven/maven-3/3.9.6/binaries/apache-maven-3.9.6-bin.tar.gz
-sudo tar -xvzf apache-maven-3.9.6-bin.tar.gz
-```
-
-Ajoutez à `~/.bash_profile` :
-
-```bash
-export JAVA_HOME=/usr/lib/jvm/java-11-openjdk
-export M2_HOME=/opt/apache-maven-3.9.6
-export PATH=$PATH:$M2_HOME/bin
-```
-
-```bash
-source ~/.bash_profile
-mvn -version
-```
-
-- Dans Jenkins :
-  - Installer "Maven Integration Plugin"
-  - Déclarer Maven et Java dans Global Tool Configuration
-
-## Étape 4 : Préparer un hôte Docker
-
-```bash
-sudo yum install docker
-sudo systemctl enable docker
-sudo systemctl start docker
-docker --version
-```
-
-```bash
-docker pull tomcat
-docker run -d --name tomcat-container -p 8081:8080 tomcat
-```
-
-Si erreur 404 :
-
-```bash
-docker exec -it tomcat-container bash
-cp -R /usr/local/tomcat/webapps.dist/* /usr/local/tomcat/webapps
-```
-
-Dockerfile personnalisé :
-
-```dockerfile
-FROM tomcat:latest
-RUN cp -R /usr/local/tomcat/webapps.dist/* /usr/local/tomcat/webapps
-```
-
-```bash
-docker build -t tomcatserver .
-docker run -d --name tomcat-server -p 8085:8080 tomcatserver
-```
-
-## Étape 5 : Intégrer Docker avec Jenkins
-
-```bash
-sudo adduser dockeradmin
-sudo passwd dockeradmin
-sudo usermod -aG docker dockeradmin
-```
-
-Modifier `/etc/ssh/sshd_config` :
-
-```bash
-PasswordAuthentication yes
-# puis :
-sudo systemctl reload sshd
-```
-
-- Jenkins > Manage Jenkins > Manage Plugins > Installer "Publish Over SSH"
-
-## Étape 6 : Créer un Job Jenkins pour déployer les artefacts sur le hôte Docker
-
-![aws](https://miro.medium.com/v2/resize:fit:750/format:webp/1*ly3rtkBmll9nUQHdCJLv5A.png)
-
-Cliquez sur "Install without restart" pour installer le plugin.
-
-Ensuite, allez dans **Manage Jenkins > Configure System** pour configurer votre hôte Docker :
-
-![aws](https://miro.medium.com/v2/resize:fit:750/format:webp/1*3INsphP5TB5_lGQ6mL-KQw.png)
-
-Dans la section **Publish over SSH**, ajoutez un nouveau serveur SSH comme ci-dessous :
-
-![aws](https://miro.medium.com/v2/resize:fit:750/format:webp/1*3hnLNy9fWJ036nHBTMjLbA.png)
-
-> **Remarque** : l’utilisation de clés SSH est recommandée, mais ici, l’authentification se fait par mot de passe. Utilisez l’adresse IP privée si vos serveurs sont dans le même sous-réseau.
-
-Cliquez sur **Apply** puis **Save**.
+Ce projet déploie automatiquement une application web Java dans un conteneur Docker sur une instance EC2 AWS, à l’aide de **Jenkins** et **Ansible**.
 
 ---
 
-### Étape 7 : Mise à jour du Dockerfile pour copier les artefacts
+## Plan
 
-Créez un dossier `/opt/docker` sur le hôte Docker :
+* Provisionner l’infrastructure AWS avec Terraform
+* Installer et configurer Jenkins, Docker et Tomcat via Ansible
+* Déployer l’application Java dans un conteneur Docker
+* Automatiser le processus de build et de déploiement avec Jenkins
+* Accéder à l’application depuis le navigateur
+
+---
+
+## Prérequis
+
+* Compte AWS avec permissions pour EC2, VPC, Subnet, Security Group
+* Compte Git/GitHub avec le code source
+* Machine locale avec Terraform et Ansible installés
+* Clé SSH pour se connecter à l’instance EC2
+
+---
+
+## 1️⃣ Provisionnement de l’infrastructure (Terraform)
+
+Le script Terraform crée :
+
+* **VPC** avec subnet public et Internet Gateway
+* **Security Group** autorisant SSH (22) et Jenkins/Tomcat (8080-9000)
+* **Instance EC2** Amazon Linux 2 (`t2.micro`) avec clé SSH
 
 ```bash
-sudo mkdir /opt/docker
-sudo chown dockeradmin:dockeradmin /opt/docker
+terraform init
+terraform plan -out plan.tf
+terraform apply plan.tf
 ```
 
-Déplacez le `Dockerfile` :
+**Output :**
+
+```
+public_ip = <IP_PUBLIQUE>
+```
+
+---
+
+## 2️⃣ Provisionnement de Jenkins, Docker et Tomcat (Ansible)
+
+Le playbook Ansible installe et configure :
+
+* Jenkins (avec service démarré)
+* Docker
+* Conteneur Tomcat personnalisé exposé sur le port 8081
+* Utilisateur `dockeradmin` avec accès Docker et SSH
 
 ```bash
-mv Dockerfile /opt/docker/
-cd /opt/docker/
-chown -R dockeradmin:dockeradmin /opt/docker/
+ansible-playbook -i inventory.ini jenkins.yml
 ```
 
-Configurez Jenkins pour envoyer les fichiers à `/opt/docker`.
+**Inventory exemple :**
+
+```ini
+[jenkins]
+<IP_PUBLIQUE> ansible_user=ec2-user ansible_ssh_private_key_file=devops_cle_rsa.pem
+```
+
+---
+
+## 3️⃣ Accès aux services
+
+* **Jenkins :** `http://<IP_PUBLIQUE>:8080`
+  Mot de passe initial :
+
+  ```bash
+  sudo cat /var/lib/jenkins/secrets/initialAdminPassword
+  ```
+
+* **Tomcat :** `http://<IP_PUBLIQUE>:8081`
+
+* **SSH dockeradmin :**
+
+```bash
+ssh dockeradmin@<IP_PUBLIQUE>
+# Mot de passe : pass
+```
+
+---
+
+## 4️⃣ Déploiement d’une application Java dans Docker via Jenkins
+
+1. Créez un job Jenkins lié à votre dépôt GitHub.
+2. Configurez **Publish over SSH** pour envoyer les artefacts vers `/opt/docker` sur l’instance EC2.
+3. Placez le `Dockerfile` et les fichiers `.war` dans `/opt/docker` :
 
 ```dockerfile
 FROM tomcat:latest
@@ -175,40 +101,27 @@ RUN cp -R /usr/local/tomcat/webapps.dist/* /usr/local/tomcat/webapps
 COPY ./*.war /usr/local/tomcat/webapps
 ```
 
-Construisez l’image :
+4. Dans Jenkins, ajoutez un **build step** pour construire et lancer le conteneur :
 
 ```bash
-docker build -t tomcat:v1 .
+cd /opt/docker
+docker build -t myapp:v1 .
+docker run -d --name myapp -p 8087:8080 myapp:v1
 ```
 
-Et lancez un conteneur :
+5. Accédez à l’application :
 
-```bash
-docker run -d --name tomcatv1 -p 8086:8080 tomcat:v1
 ```
-
-Accédez à l’application : `http://<IP_PUBLIC>:8086/webapp/`
+http://<IP_PUBLIQUE>:8087/webapp/
+```
 
 ---
 
-## Étape 8 : Automatiser le processus complet avec Jenkins
+## 5️⃣ Conclusion
 
-Dans Jenkins, dans votre job, sous **Exec command**, ajoutez :
+Grâce à Terraform, Ansible et Jenkins, nous avons :
 
-```bash
-cd /opt/docker;
-docker build -t regapp:v1 .;
-docker run -d --name registerapp -p 8087:8080 regapp:v1
-```
-
-![aws](https://miro.medium.com/v2/resize:fit:750/format:webp/1*D2aGmqZ8Uh1p4Fmz_nHsVg.png)
-
-Effectuez une modification dans le dépôt GitHub pour déclencher le build automatiquement.
-
-Une fois le build terminé, accédez à l’application sur `http://<IP_PUBLIC>:8087/webapp/`
-
----
-
-## Conclusion
-
-**Nous avons automatisé le déploiement d’une application Java à l’aide de Jenkins, Docker, GitHub et AWS EC2.**
+* Provisionné automatiquement l’infrastructure sur AWS
+* Installé et configuré Jenkins, Docker et Tomcat
+* Déployé une application Java dans un conteneur Docker
+* Mis en place un processus automatisé de build et déploiement depuis GitHub
